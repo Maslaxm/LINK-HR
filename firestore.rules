@@ -1,0 +1,425 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActive() {
+      return signedIn();
+    }
+
+    function isSuper() {
+      return signedIn();
+    }
+
+    function myOrg() {
+      return userData().organizationId;
+    }
+
+    function myEmployeeId() {
+      return userData().employeeId;
+    }
+
+    function memberOf(orgId) {
+      return isActive() && (isSuper() || (orgId != null && orgId == myOrg()));
+    }
+
+    function hasPerm(permission) {
+      return isActive() && (isSuper() || (userData().permissions is list && userData().permissions.hasAny([permission])));
+    }
+
+    function hasAnyPerm(permissions) {
+      return isActive() && (isSuper() || (userData().permissions is list && userData().permissions.hasAny(permissions)));
+    }
+
+    function superProfileData(uid) {
+      return request.resource.data.uid == uid
+        && request.resource.data.email is string
+        && request.resource.data.role == 'super_admin'
+        && request.resource.data.roleId == null
+        && request.resource.data.permissions is list
+        && request.resource.data.permissions.size() == 1
+        && request.resource.data.permissions[0] == '*'
+        && request.resource.data.isSuperAdmin == true
+        && request.resource.data.isActive == true
+        && request.resource.data.organizationId == null
+        && request.resource.data.departmentId == null
+        && request.resource.data.employeeId == null;
+    }
+
+    function employeeOrg(employeeId) {
+      return get(/databases/$(database)/documents/employees/$(employeeId)).data.organizationId;
+    }
+
+    match /users/{uid} {
+      allow get: if request.auth != null && request.auth.uid == uid
+        || isSuper()
+        || (isActive() && hasAnyPerm(['users.view', 'users.manage']) && memberOf(resource.data.organizationId));
+      allow list: if isSuper()
+        || (isActive() && hasAnyPerm(['users.view', 'users.manage']) && resource.data.organizationId == myOrg());
+      allow create: if request.auth != null
+        && request.auth.uid == uid
+        && superProfileData(uid);
+      allow delete: if false;
+      allow update: if (
+        request.auth != null
+        && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'uid', 'email', 'displayName', 'phone', 'photoURL', 'photoPath', 'preferences', 'jobTitle',
+          'role', 'roleId', 'permissions', 'isSuperAdmin', 'isActive', 'organizationId',
+          'departmentId', 'employeeId', 'lastLoginAt', 'updatedAt'
+        ])
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'super_admin'
+        && request.resource.data.isSuperAdmin == true
+        && request.resource.data.isActive == true
+      ) || (
+        isActive()
+        && hasAnyPerm(['users.edit', 'users.manage'])
+        && memberOf(resource.data.organizationId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'employeeId', 'departmentId', 'jobTitle', 'updatedAt', 'role', 'roleId', 'permissions',
+          'isSuperAdmin', 'isActive'
+        ])
+      );
+    }
+
+    match /organizations/{orgId} {
+      allow get, list: if isSuper() || (isActive() && orgId == myOrg());
+      allow create, update, delete: if isSuper();
+    }
+
+    match /roles/{roleId} {
+      allow get, list: if isSuper()
+        || (isActive() && hasAnyPerm(['roles.view', 'users.view', 'users.manage']) && resource.data.organizationId == myOrg());
+      allow create, update, delete: if isSuper();
+    }
+
+    match /systemSettings/{orgId} {
+      allow get, list: if isSuper() || memberOf(resource.data.organizationId);
+      allow create: if isSuper()
+        || (isActive() && hasAnyPerm(['settings.edit', 'settings.manage']) && memberOf(request.resource.data.organizationId));
+      allow update: if isSuper()
+        || (isActive() && hasAnyPerm(['settings.edit', 'settings.manage'])
+          && memberOf(resource.data.organizationId)
+          && memberOf(request.resource.data.organizationId));
+      allow delete: if isSuper();
+    }
+
+    match /auditLogs/{logId} {
+      allow get, list: if isSuper()
+        || (isActive() && hasPerm('auditLogs.view') && memberOf(resource.data.organizationId));
+      allow create: if isActive()
+        && request.resource.data.userId == request.auth.uid
+        && (isSuper() || request.resource.data.organizationId == myOrg());
+      allow update, delete: if false;
+    }
+
+    match /employees/{employeeId} {
+      allow get: if memberOf(resource.data.organizationId)
+        && (hasAnyPerm([
+          'employees.view', 'employees.edit', 'employees.create', 'employees.delete', 'payroll.view',
+          'attendance.create', 'attendance.edit', 'attendance.approve',
+          'leave.create', 'leave.edit', 'leave.approve',
+          'payroll.create', 'payroll.edit',
+          'expenses.create', 'expenses.edit', 'expenses.approve',
+          'tasks.create', 'tasks.edit'
+        ])
+          || resource.data.userId == request.auth.uid
+          || employeeId == myEmployeeId());
+      allow list: if memberOf(resource.data.organizationId)
+        && (hasAnyPerm([
+          'employees.view', 'employees.edit', 'employees.create', 'employees.delete', 'payroll.view',
+          'attendance.create', 'attendance.edit', 'attendance.approve',
+          'leave.create', 'leave.edit', 'leave.approve',
+          'payroll.create', 'payroll.edit',
+          'expenses.create', 'expenses.edit', 'expenses.approve',
+          'tasks.create', 'tasks.edit'
+        ])
+          || resource.data.userId == request.auth.uid);
+      allow create: if isActive()
+        && hasAnyPerm(['employees.create', 'employees.manage'])
+        && memberOf(request.resource.data.organizationId)
+        && !request.resource.data.keys().hasAny(['salary', 'basicSalary', 'netSalary', 'bankAccount']);
+      allow update: if isActive()
+        && hasAnyPerm(['employees.edit', 'employees.create', 'employees.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['salary', 'basicSalary', 'netSalary', 'bankAccount']);
+      allow delete: if isActive()
+        && hasAnyPerm(['employees.delete', 'employees.manage'])
+        && memberOf(resource.data.organizationId);
+
+      match /private/{documentId} {
+        allow read: if isSuper()
+          || (isActive()
+            && memberOf(employeeOrg(employeeId))
+            && (hasPerm('payroll.view') || employeeId == myEmployeeId()));
+        allow create, update: if isActive()
+          && memberOf(employeeOrg(employeeId))
+          && hasAnyPerm(['payroll.edit', 'payroll.create', 'payroll.manage']);
+        allow delete: if isActive()
+          && memberOf(employeeOrg(employeeId))
+          && hasAnyPerm(['payroll.edit', 'payroll.create', 'payroll.manage', 'employees.delete', 'employees.manage']);
+      }
+    }
+
+    match /departments/{departmentId} {
+      allow get, list: if memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['departments.create', 'departments.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['departments.edit', 'departments.create', 'departments.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['departments.delete', 'departments.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /positions/{positionId} {
+      allow get, list: if memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['positions.create', 'positions.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['positions.edit', 'positions.create', 'positions.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['positions.delete', 'positions.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /projects/{projectId} {
+      allow get, list: if isActive()
+        && hasAnyPerm(['projects.view', 'projects.edit', 'projects.create', 'projects.delete', 'tasks.create', 'tasks.edit'])
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['projects.create', 'projects.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['projects.edit', 'projects.create', 'projects.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['projects.delete', 'projects.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /projectMembers/{membershipId} {
+      allow get, list: if isActive()
+        && hasAnyPerm(['projects.view', 'projects.edit', 'projects.create'])
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['projects.edit', 'projects.create', 'projects.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['projects.edit', 'projects.create', 'projects.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['projects.edit', 'projects.create', 'projects.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /tasks/{taskId} {
+      allow get, list: if isActive()
+        && hasAnyPerm(['tasks.view', 'tasks.edit', 'tasks.create', 'tasks.delete'])
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['tasks.create', 'tasks.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['tasks.edit', 'tasks.create', 'tasks.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['tasks.delete', 'tasks.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /attendance/{recordId} {
+      allow get, list: if memberOf(resource.data.organizationId)
+        && (hasAnyPerm(['attendance.approve', 'attendance.edit', 'attendance.manage'])
+          || (hasPerm('attendance.view') && resource.data.employeeId == myEmployeeId()));
+      allow create: if isActive()
+        && hasAnyPerm(['attendance.create', 'attendance.edit', 'attendance.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['attendance.edit', 'attendance.approve', 'attendance.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['attendance.delete', 'attendance.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /leaveTypes/{leaveTypeId} {
+      allow get, list: if isActive()
+        && hasPerm('leave.view')
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['leave.edit', 'leave.create', 'leave.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['leave.edit', 'leave.create', 'leave.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['leave.delete', 'leave.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /leaveRequests/{requestId} {
+      allow get, list: if memberOf(resource.data.organizationId)
+        && (hasAnyPerm(['leave.approve', 'leave.edit', 'leave.manage'])
+          || (hasPerm('leave.view') && resource.data.userId == request.auth.uid));
+      allow create: if isActive()
+        && hasAnyPerm(['leave.create', 'leave.manage'])
+        && memberOf(request.resource.data.organizationId)
+        && (request.resource.data.userId == request.auth.uid
+          || hasAnyPerm(['leave.approve', 'leave.edit']));
+      allow update: if memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId)
+        && (
+          hasAnyPerm(['leave.edit', 'leave.approve', 'leave.manage'])
+          || (
+            request.resource.data.userId == request.auth.uid
+            && resource.data.userId == request.auth.uid
+            && request.resource.data.status == 'cancelled'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status', 'approverComment', 'decidedAt', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isActive()
+        && hasAnyPerm(['leave.delete', 'leave.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /payrolls/{payrollId} {
+      allow get, list: if isActive()
+        && hasAnyPerm(['payroll.view', 'payroll.edit', 'payroll.create', 'payroll.delete'])
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['payroll.create', 'payroll.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['payroll.edit', 'payroll.create', 'payroll.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['payroll.delete', 'payroll.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /payrollItems/{itemId} {
+      allow get, list: if isActive()
+        && hasAnyPerm(['payroll.view', 'payroll.edit', 'payroll.create'])
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['payroll.create', 'payroll.edit', 'payroll.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['payroll.edit', 'payroll.create', 'payroll.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['payroll.delete', 'payroll.edit', 'payroll.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /expenses/{expenseId} {
+      allow get, list: if isActive()
+        && hasAnyPerm(['expenses.view', 'expenses.edit', 'expenses.create', 'expenses.approve', 'expenses.delete'])
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['expenses.create', 'expenses.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['expenses.edit', 'expenses.approve', 'expenses.create', 'expenses.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['expenses.delete', 'expenses.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /documents/{documentId} {
+      allow get: if isActive()
+        && memberOf(resource.data.organizationId)
+        && (
+          hasAnyPerm(['documents.create', 'documents.delete', 'employees.edit'])
+          || (
+            hasPerm('documents.view')
+            && (
+              resource.data.visibility == 'organization'
+              || (resource.data.visibility == 'department' && resource.data.departmentId == userData().departmentId && userData().departmentId != null)
+              || (resource.data.visibility == 'employee' && resource.data.employeeId == myEmployeeId() && myEmployeeId() != null)
+            )
+          )
+        );
+      allow list: if isActive()
+        && memberOf(resource.data.organizationId)
+        && (
+          hasAnyPerm(['documents.create', 'documents.delete', 'employees.edit'])
+          || (
+            hasPerm('documents.view')
+            && (
+              resource.data.visibility == 'organization'
+              || (resource.data.visibility == 'department' && resource.data.departmentId == userData().departmentId && userData().departmentId != null)
+              || (resource.data.visibility == 'employee' && resource.data.employeeId == myEmployeeId() && myEmployeeId() != null)
+            )
+          )
+        );
+      allow create: if isActive()
+        && hasAnyPerm(['documents.create', 'documents.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['documents.create', 'documents.edit', 'documents.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['documents.delete', 'documents.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /announcements/{announcementId} {
+      allow get, list: if isActive()
+        && hasPerm('announcements.view')
+        && memberOf(resource.data.organizationId);
+      allow create: if isActive()
+        && hasAnyPerm(['announcements.create', 'announcements.manage'])
+        && memberOf(request.resource.data.organizationId);
+      allow update: if isActive()
+        && hasAnyPerm(['announcements.edit', 'announcements.create', 'announcements.manage'])
+        && memberOf(resource.data.organizationId)
+        && memberOf(request.resource.data.organizationId);
+      allow delete: if isActive()
+        && hasAnyPerm(['announcements.delete', 'announcements.manage'])
+        && memberOf(resource.data.organizationId);
+    }
+
+    match /notifications/{notificationId} {
+      allow get, list: if isActive() && resource.data.userId == request.auth.uid;
+      allow create: if isActive()
+        && request.resource.data.userId is string
+        && request.resource.data.createdBy == request.auth.uid
+        && (isSuper() || request.resource.data.organizationId == myOrg());
+      allow update, delete: if isActive() && resource.data.userId == request.auth.uid;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

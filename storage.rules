@@ -1,0 +1,151 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userData() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActive() {
+      return signedIn();
+    }
+
+    function isSuper() {
+      return signedIn();
+    }
+
+    function myOrg() {
+      return userData().organizationId;
+    }
+
+    function myDepartmentId() {
+      return userData().departmentId;
+    }
+
+    function myEmployeeId() {
+      return userData().employeeId;
+    }
+
+    function memberOf(orgId) {
+      return isActive() && (isSuper() || (orgId != null && orgId == myOrg()));
+    }
+
+    function hasPerm(permission) {
+      return isActive() && (isSuper() || (userData().permissions is list && userData().permissions.hasAny([permission])));
+    }
+
+    function hasAnyPerm(permissions) {
+      return isActive() && (isSuper() || (userData().permissions is list && userData().permissions.hasAny(permissions)));
+    }
+
+    function validUpload() {
+      return request.resource.size > 0
+        && request.resource.size <= 10 * 1024 * 1024
+        && request.resource.contentType != null;
+    }
+
+    function validImage() {
+      return validUpload() && request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+    }
+
+    function documentRecord(documentId) {
+      return firestore.get(/databases/(default)/documents/documents/$(documentId)).data;
+    }
+
+    function canReadDocument(orgId, documentId) {
+      return signedIn()
+        && documentRecord(documentId).organizationId == orgId
+        && memberOf(orgId)
+        && (
+          hasAnyPerm(['documents.create', 'documents.delete', 'employees.edit'])
+          || (
+            hasPerm('documents.view')
+            && (
+              documentRecord(documentId).visibility == 'organization'
+              || (documentRecord(documentId).visibility == 'department' && documentRecord(documentId).departmentId == myDepartmentId() && myDepartmentId() != null)
+              || (documentRecord(documentId).visibility == 'employee' && documentRecord(documentId).employeeId == myEmployeeId() && myEmployeeId() != null)
+            )
+          )
+        );
+    }
+
+    match /avatars/{uid}/{fileName} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == uid && validImage();
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /organizations/{orgId}/branding/{fileName} {
+      allow read: if signedIn() && memberOf(orgId);
+      allow create, update: if signedIn() && memberOf(orgId) && hasAnyPerm(['organizations.edit', 'organizations.manage']) && validImage();
+      allow delete: if signedIn() && memberOf(orgId) && hasAnyPerm(['organizations.edit', 'organizations.manage']);
+    }
+
+    match /organizations/{orgId}/employees/{employeeId}/photo/{fileName} {
+      allow read: if signedIn() && memberOf(orgId);
+      allow create, update: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['employees.edit', 'employees.create', 'employees.manage'])
+        && validImage();
+      allow delete: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['employees.edit', 'employees.create', 'employees.manage', 'employees.delete']);
+    }
+
+    match /documents/{orgId}/{documentId}/{fileName} {
+      allow read: if canReadDocument(orgId, documentId);
+      allow create, update: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['documents.create', 'documents.edit', 'documents.manage'])
+        && validUpload();
+      allow delete: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['documents.delete', 'documents.manage']);
+    }
+
+    match /announcements/{orgId}/{announcementId}/{kind}/{fileName} {
+      allow read: if signedIn() && memberOf(orgId) && hasPerm('announcements.view');
+      allow create, update: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['announcements.create', 'announcements.edit', 'announcements.manage'])
+        && validUpload();
+      allow delete: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['announcements.delete', 'announcements.edit', 'announcements.create', 'announcements.manage']);
+    }
+
+    match /expenses/{orgId}/{expenseId}/{fileName} {
+      allow read: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['expenses.view', 'expenses.create', 'expenses.edit', 'expenses.approve', 'expenses.manage']);
+      allow create, update: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['expenses.create', 'expenses.edit', 'expenses.manage'])
+        && validUpload();
+      allow delete: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['expenses.delete', 'expenses.edit', 'expenses.manage']);
+    }
+
+    match /tasks/{orgId}/{taskId}/{fileName} {
+      allow read: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['tasks.view', 'tasks.create', 'tasks.edit', 'tasks.manage']);
+      allow create, update: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['tasks.create', 'tasks.edit', 'tasks.manage'])
+        && validUpload();
+      allow delete: if signedIn()
+        && memberOf(orgId)
+        && hasAnyPerm(['tasks.edit', 'tasks.delete', 'tasks.manage']);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
